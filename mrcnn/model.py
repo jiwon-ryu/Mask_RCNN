@@ -331,6 +331,8 @@ class ProposalLayer(KE.Layer):
     def compute_output_shape(self, input_shape):
         return (None, self.proposal_count, 4)
 
+    
+
 
 ############################################################
 #  ROIAlign Layer
@@ -696,8 +698,14 @@ def refine_detections_graph(rois, probs, deltas, window, config):
     Returns detections shaped: [num_detections, (y1, x1, y2, x2, class_id, score)] where
         coordinates are normalized.
     """
-    # Class IDs per ROI
-    class_ids = tf.argmax(probs, axis=1, output_type=tf.int32)
+    # Class IDs per ROI - old
+    #class_ids = tf.argmax(probs, axis=1, output_type=tf.int32)
+    # Class IDs per ROI - new
+    if config.NUM_CLASSES == 2:
+        class_ids = tf.ones_like(probs[:, 0], dtype=tf.int32)
+    else:
+        class_ids = tf.argmax(probs, axis=1, output_type=tf.int32)
+        
     # Class probability of the top class of each ROI
     indices = tf.stack([tf.range(probs.shape[0]), class_ids], axis=1)
     class_scores = tf.gather_nd(probs, indices)
