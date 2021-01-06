@@ -11,8 +11,9 @@
   
   2020-08-14 Jiwon Ryu
 '''
+
 import os
-import cv2
+#import cv2
 import sys
 import random
 import math
@@ -33,14 +34,15 @@ from mrcnn.model import log
 
 import cucumber  
 
-# Root directory of the project
-ROOT_DIR = os.getcwd()
+# Root directory of the
+#  project
+ROOT_DIR = os.getcwd() # ~/RJW/Mask_RCNN
 
 # Import Mask RCNN
 sys.path.append(ROOT_DIR)  # To find local version of the library
 
 #custom_WEIGHTS_PATH = sorted(glob.glob(ROOT_DIR+"/logs/*/mask_rcnn_*.h5"))[-1]
-custom_WEIGHTS_PATH = ROOT_DIR + '/mask_rcnn_cucumber_0040.h5'
+custom_WEIGHTS_PATH = ROOT_DIR + '/mask_rcnn_cucumber_sj.h5'
 
 # Directory to save logs and trained model
 MODEL_DIR = os.path.join(ROOT_DIR, "logs")
@@ -103,6 +105,7 @@ reload(visualize)
 
 
 ##### 결과이미지 출력 / P-R 곡선 / AP 계산 #####
+'''
 pred_match_list = []   ## 모든 이미지의 pred_match를 모은 1차원 list
 gt_match_list = []   ## '' gt_match를 모은 ''
 pred_iou_list = []   ## pred_match_list에 대응하는 iou_singleimg를 모은 list
@@ -110,6 +113,11 @@ gt_iou_list = []   ## gt_match_list에 ''
 
 AP_csv = []
 name_csv = []
+'''
+# added on Dec 30, 2020
+gt_match_sum=[]
+pred_match_sum=[]
+pred_scores_sum=[]
 # 폴더 내 이미지마다 처리
 for image_id in dataset.image_ids:
   image, image_meta, gt_class_id, gt_bbox, gt_mask =\
@@ -127,16 +135,22 @@ for image_id in dataset.image_ids:
   r = results[0]
   
   #save_path = '/data/JW/Mask_RCNN/result_img/'   ## 마스킹 된 결과 이미지 저장 경로 설정
-  save_path = '/home/mainuser/mount/JW/Mask_RCNN/result_img/'
+  save_path = '/home/mainuser/mount/RJW/Mask_RCNN/result_img/'
   visualize.display_instances(image, info['id'], save_path, r['rois'], r['masks'], r['class_ids'], 
                               dataset.class_names, r['scores'], ax=ax,
                               title="Predictions")   ## 마스킹 된 결과 이미지 저장
     
-  gt_match, pred_match, overlaps, iou_singleimg = utils.compute_matches(
+  gt_match, pred_match, overlaps, iou_singleimg, pred_scores = utils.compute_matches(
         gt_bbox, gt_class_id, gt_mask,
-        r['rois'], r['class_ids'], r['scores'], r['masks'])   ## iou_singleimg: 2*2 numpy array (row: pred box, col: gt box)  
+        r['rois'], r['class_ids'], r['scores'], r['masks'], iou_threshold=0.5)   ## iou_singleimg: 2*2 numpy array (row: pred box, col: gt box)  
   
+  # added Dec 30, 2020
+  gt_match_sum=np.hstack([gt_match_sum,gt_match])
+  pred_match_sum=np.hstack([pred_match_sum,pred_match])
+  pred_scores_sum=np.hstack([pred_scores_sum,pred_scores])
+
   # 이미지 별로 csv에 저장
+  '''
   precisions_single = np.cumsum(pred_match > -1) / (np.arange(len(pred_match)) + 1)
   recalls_single = np.cumsum(pred_match > -1).astype(np.float32) / len(gt_match)
 
@@ -165,17 +179,28 @@ for image_id in dataset.image_ids:
         gt_iou_list.append(iou_singleimg[int(gt_match[j]), j])
       else:
         gt_iou_list.append(iou_singleimg[np.argmax(iou_singleimg[:,j]),j])
+  '''
 
 
   plt.close()
 
+# added on Dec 30, 2020
+indices_score = np.argsort(pred_scores_sum)[::-1]
+pred_match_sum = pred_match_sum[indices_score]
+precisions = np.cumsum(pred_match_sum > -1) / (np.arange(len(pred_match_sum))+1)
+recalls = np.cumsum(pred_match_sum > -1).astype(np.float32) / len(gt_match_sum)
+precisions = np.concatenate([[0], precisions, [0]])
+recalls = np.concatenate([[0], recalls, [recalls[-1]]])
+
+'''
 ## 개별 이미지 결과 저장 
 AP_csv = np.reshape(AP_csv, (len(AP_csv), 1))
 name_csv = np.reshape(name_csv, (len(name_csv), 1))
 image_csv = np.concatenate([name_csv, AP_csv], 1)
 np.savetxt('image_ap.csv', image_csv, fmt='%s', delimiter=',')
+'''
 
-##
+'''
 # list to np array
 pred_match_list = np.array(pred_match_list)
 gt_match_list = np.array(gt_match_list)
@@ -196,7 +221,7 @@ print('recall: ', recalls[-1])
 precisions = np.concatenate([[0], precisions, [0]])
 #recalls = np.concatenate([[0], recalls, [1]])
 recalls = np.concatenate([[0], recalls, [recalls[-1]]])
-
+'''
 
 for i in range(len(precisions) - 2, -1, -1):   ## range: len-2부터 0까지 -1씩 감소하는 list
   precisions[i] = np.maximum(precisions[i], precisions[i + 1])   ## precision을 단조감소 함수로 만듦
@@ -208,5 +233,12 @@ print('AP: ', AP)   ## AP 출력
 
 # save precision-recall curve
 #prcurve_path = '/data/JW/Mask_RCNN/pr_curve.jpg'   ## pr curve 이미지로 저장할 경로
-prcurve_path = '/home/mainuser/mount/JW/Mask_RCNN/pr_curve.jpg'
+prcurve_path = '/home/mainuser/mount/RJW/Mask_RCNN/pr_curve.jpg'
 visualize.plot_precision_recall(AP, precisions, recalls, prcurve_path)   ## pr curve 저장
+
+# save precisions & recalls as csv
+precisions = precisions.reshape(np.shape(precisions)[0], 1)
+recalls = recalls.reshape(np.shape(recalls)[0], 1)
+print(np.shape(precisions), np.shape(recalls))
+pr_pair = np.concatenate((recalls, precisions), axis=1)
+np.savetxt('p-r pair.csv', pr_pair, fmt='%s', delimiter=',')
