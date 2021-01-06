@@ -701,7 +701,7 @@ def compute_matches(gt_boxes, gt_class_ids, gt_masks,
         #iou_singleimg = np.reshape(iou_singleimg, (len(pred_boxes), len(sorted_ixs)))
     iou_singleimg = np.reshape(iou_singleimg, (len(pred_match), len(gt_match)))                          
     
-    return gt_match, pred_match, overlaps, iou_singleimg
+    return gt_match, pred_match, overlaps, iou_singleimg, pred_scores
 
 
 def compute_ap(gt_boxes, gt_class_ids, gt_masks,
