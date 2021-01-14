@@ -23,7 +23,9 @@ import keras.layers as KL
 import keras.engine as KE
 import keras.models as KM
 
+from keras.callbacks import Callback
 from mrcnn import utils
+from mrcnn.utils import Dataset
 
 # Requires TensorFlow 1.3+ and Keras 2.0.8+.
 from distutils.version import LooseVersion
@@ -330,8 +332,6 @@ class ProposalLayer(KE.Layer):
 
     def compute_output_shape(self, input_shape):
         return (None, self.proposal_count, 4)
-
-    
 
 
 ############################################################
@@ -698,14 +698,11 @@ def refine_detections_graph(rois, probs, deltas, window, config):
     Returns detections shaped: [num_detections, (y1, x1, y2, x2, class_id, score)] where
         coordinates are normalized.
     """
-    # Class IDs per ROI - old
-    #class_ids = tf.argmax(probs, axis=1, output_type=tf.int32)
-    # Class IDs per ROI - new
+    # Class IDs per ROI
     if config.NUM_CLASSES == 2:
         class_ids = tf.ones_like(probs[:, 0], dtype=tf.int32)
     else:
         class_ids = tf.argmax(probs, axis=1, output_type=tf.int32)
-        
     # Class probability of the top class of each ROI
     indices = tf.stack([tf.range(probs.shape[0]), class_ids], axis=1)
     class_scores = tf.gather_nd(probs, indices)
@@ -2353,7 +2350,10 @@ class MaskRCNN():
 
         # Add custom callbacks to the list
         if custom_callbacks:
-            callbacks += custom_callbacks
+            callbacks = [keras.callbacks.ModelCheckpoint(self.checkpoint_path,
+                                            verbose=0, save_weights_only=True)] + custom_callbacks + [keras.callbacks.TensorBoard(log_dir=self.log_dir,
+                                            histogram_freq=0, write_graph=True, write_images=False)]
+                                            
 
         # Train
         log("\nStarting at epoch {}. LR={}\n".format(self.epoch, learning_rate))
@@ -2874,3 +2874,137 @@ def denorm_boxes_graph(boxes, shape):
     scale = tf.concat([h, w, h, w], axis=-1) - tf.constant(1.0)
     shift = tf.constant([0., 0., 1., 1.])
     return tf.cast(tf.round(tf.multiply(boxes, scale) + shift), tf.int32)
+
+############################################################
+#  Custom Callbacks
+############################################################
+
+class MeanAveragePrecisionCallback(Callback):
+    def __init__(self, train_model: MaskRCNN, inference_model: MaskRCNN, dataset: Dataset,
+                 calculate_at_every_X_epoch: int = 3, dataset_limit: int = None,
+                 verbose: int = 1):
+        """
+        Callback which calculates the mAP on the defined test/validation dataset
+        :param train_model: Mask RCNN model in training mode
+        :param inference_model: Mask RCNN model in inference mode
+        :param dataset: test/validation dataset, it will calculate the mAP on this set
+        :param calculate_at_every_X_epoch: With this parameter we can define if we want to do the calculation at
+        every epoch or every second, etc...
+        :param dataset_limit: When we have a huge dataset calculation can take a lot of time, with this we can set a
+        limit to the number of data points used
+        :param verbose: set verbosity (1 = verbose, 0 = quiet)
+        """
+
+        super().__init__()
+
+        if train_model.mode != "training":
+            raise ValueError("Train model should be in training mode, instead it is in: {0}".format(train_model.mode))
+
+        if inference_model.mode != "inference":
+            raise ValueError(
+                "Inference model should be in inference mode, instead it is in: {0}".format(train_model.mode))
+
+        if inference_model.config.BATCH_SIZE != 1:
+            raise ValueError("This callback only works with the bacth size of 1, instead: {0} was defined".format(
+                inference_model.config.BATCH_SIZE))
+
+        self.train_model = train_model
+        self.inference_model = inference_model
+        self.dataset = dataset
+        self.calculate_at_every_X_epoch = calculate_at_every_X_epoch
+        self.dataset_limit = len(self.dataset.image_ids)
+        if dataset_limit is not None:
+            self.dataset_limit = dataset_limit
+        self.dataset_image_ids = self.dataset.image_ids.copy()
+
+        self._verbose_print = print if verbose > 0 else lambda *a, **k: None
+
+    def on_epoch_end(self, epoch, logs=None):
+        if epoch > 0 and epoch % self.calculate_at_every_X_epoch == 0:
+            self._verbose_print("Calculating mAP...")
+            self._load_weights_for_model()
+            print(logs)
+
+            mAP = self._calculate_mean_average_precision()
+
+            if logs is not None:
+                logs["val_mean_average_precision"] = mAP
+            print(logs)
+
+            self._verbose_print("mAP at epoch {0} is: {1}".format(epoch, mAP))
+
+        super().on_epoch_end(epoch, logs)
+
+    def _load_weights_for_model(self):
+        last_weights_path = self.train_model.find_last()
+        self._verbose_print("Loaded weights for the inference model (last checkpoint of the train model): {0}".format(
+            last_weights_path))
+        self.inference_model.load_weights(last_weights_path,
+                                          by_name=True)
+
+    def _calculate_mean_average_precision(self):
+        mAPs = []
+
+        np.random.shuffle(self.dataset_image_ids)
+        gt_match_sum=[]
+        pred_match_sum=[]
+        pred_scores_sum=[]
+        for image_id in self.dataset_image_ids[:self.dataset_limit]:
+            image, image_meta, gt_class_id, gt_bbox, gt_mask = load_image_gt(self.dataset, self.inference_model.config,
+                                                                             image_id, use_mini_mask=False)
+            results = self.inference_model.detect([image], verbose=0)
+            r = results[0]
+            
+            gt_match, pred_match,_, pred_scores = utils.compute_matches(gt_bbox, gt_class_id, gt_mask, r["rois"], r["class_ids"], r["scores"], r['masks'], iou_threshold=0.5, score_threshold=0.0)
+            # rois=r["rois"]
+            # class_ids=r["class_ids"]
+            # scores=r["scores"]
+            # masks=r['masks']
+            # if i==0:
+            #     gt_bbox_sum=gt_bbox
+            #     gt_class_id_sum=gt_class_id
+            #     gt_mask_sum=gt_mask
+            #     masks_sum=masks
+            #     scores_sum=scores
+            #     rois_sum=rois
+            #     class_ids_sum=class_ids
+            #     i=1
+            # else:
+            #     gt_bbox_sum=np.vstack([gt_bbox_sum,gt_bbox])
+            #     gt_class_id_sum=np.hstack([gt_class_id_sum,gt_class_id])
+            #     gt_mask_sum=np.dstack([gt_mask_sum,gt_mask])
+            #     masks_sum=np.dstack([masks_sum,masks])
+            #     scores_sum=np.hstack([scores_sum,scores])
+            #     rois_sum=np.vstack([rois_sum,rois])
+            #     class_ids_sum=np.hstack([class_ids_sum,class_ids])
+            # gt_bbox_sum.extend(gt_bbox)
+            # gt_class_id_sum.extend(gt_class_id)
+            # gt_mask_sum.extend(gt_mask)
+            # masks_sum.extend(masks)
+            # scores_sum.extend(scores)
+            # rois_sum.extend(rois)
+            # class_ids_sum.extend(class_ids)
+            gt_match_sum=np.hstack([gt_match_sum,gt_match])
+            pred_match_sum=np.hstack([pred_match_sum,pred_match])
+            pred_scores_sum=np.hstack([pred_scores_sum,pred_scores])
+        
+        indices1 = np.argsort(pred_scores_sum)[::-1]
+        pred_match_sum = pred_match_sum[indices1]
+        print(pred_match_sum)
+        print(pred_scores_sum)
+
+        precisions = np.cumsum(pred_match_sum > -1) / (np.arange(len(pred_match_sum)) + 1)
+        recalls = np.cumsum(pred_match_sum > -1).astype(np.float32) / len(gt_match_sum)
+        precisions = np.concatenate([[0], precisions, [0]])
+        recalls = np.concatenate([[0], recalls, [1]])
+
+        for i in range(len(precisions) - 2, -1, -1):
+            precisions[i] = np.maximum(precisions[i], precisions[i + 1])
+
+        # Compute mean AP over recall range
+        indices = np.where(recalls[:-1] != recalls[1:])[0] + 1
+        mAP = np.sum((recalls[indices] - recalls[indices - 1]) *
+                     precisions[indices])
+            
+
+        return mAP
